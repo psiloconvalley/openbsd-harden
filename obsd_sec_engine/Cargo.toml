@@ -1,0 +1,12 @@
+[package]
+name = "obsd_sec_engine"
+version = "0.7.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+tokio = { version = "1.35", features = ["full"] }
+reqwest = { version = "0.11", features = ["rustls-tls-native-roots", "json"], default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.10"
