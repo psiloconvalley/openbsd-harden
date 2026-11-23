@@ -13,16 +13,16 @@ err() {
 
 assert() {
 	local name="$1" got="$2" want="$3"
-	if [[ "$got" != "$want" ]]; then
+	if [ "$got" != "$want" ]; then
 		err "check failed for $name (got '$got', want '$want')"
 	fi
 	print "ok: $name ($got)"
 }
 
 backup() {
-	if [[ -f "$1" ]]; then
-		if [[ ! -f "$1.orig" ]]; then
-			cp -p "$1" "$1.orig" || true
+	if [ -f "$1" ]; then
+		if [ ! -f "$1.orig" ]; then
+			cp -p "$1" "$1.orig"
 		fi
 	fi
 }
@@ -30,7 +30,7 @@ backup() {
 set_sysctl() {
 	local key="$1" val="$2" live="$3"
 
-	if [[ "$live" == "1" ]]; then
+	if [ "$live" = "1" ]; then
 		sysctl "${key}=${val}" >/dev/null
 		assert "sysctl $key" "$(sysctl -n "$key")" "$val"
 	fi
@@ -58,23 +58,26 @@ get_sshd_val() {
 	local opt="$1"
 	local val
 	val="$(/usr/sbin/sshd -f /etc/ssh/sshd_config -T 2>/dev/null | awk -v o="$opt" '$1 == o {print $2}')"
-	if [[ -z "$val" ]]; then
+	if [ -z "$val" ]; then
 		val="$(awk -v o="$opt" 'tolower($1) == tolower(o) {print $2}' /etc/ssh/sshd_config | tail -n1)"
 	fi
 	print "$val"
 }
 
 # --- Pre-flight Checks ---
-if [[ $(id -u) -ne 0 ]]; then
+if [ "$(id -u)" -ne 0 ]; then
 	err "need root privileges (run via su - or doas)"
 fi
 
-if [[ $(uname -s) != "OpenBSD" ]]; then
+if [ "$(uname -s)" != "OpenBSD" ]; then
 	err "unsupported OS"
 fi
 
 USER_TARGET="${1:-}"
-if [[ -z "$USER_TARGET" ]] || [[ "$USER_TARGET" == "root" ]]; then
+if [ -z "$USER_TARGET" ]; then
+	err "usage: ${0##*/} <username>"
+fi
+if [ "$USER_TARGET" = "root" ]; then
 	err "usage: ${0##*/} <username>"
 fi
 
@@ -83,7 +86,7 @@ if ! id "$USER_TARGET" >/dev/null 2>/dev/null; then
 fi
 
 USER_HOME="$(eval echo ~"$USER_TARGET")"
-if [[ ! -d "$USER_HOME" ]]; then
+if [ ! -d "$USER_HOME" ]; then
 	err "missing home directory '$USER_HOME'"
 fi
 
@@ -103,18 +106,23 @@ print "=================================================================="
 for mp in /tmp /var /home; do
 	if mount | grep -q " on ${mp} "; then
 		opts="$(mount | grep " on ${mp} ")"
-		if [[ "$opts" == *nodev* ]] && [[ "$opts" == *nosuid* ]]; then
-			assert "fstab $mp security flags" "nodev,nosuid" "nodev,nosuid"
-		else
-			print -u2 "warn: $mp is missing nodev or nosuid mount flags"
-		fi
+		case "$opts" in
+			*nodev*nosuid*|*nosuid*nodev*)
+				assert "fstab $mp security flags" "nodev,nosuid" "nodev,nosuid"
+				;;
+			*)
+				print -u2 "warn: $mp is missing nodev or nosuid mount flags"
+				;;
+		esac
 	fi
 done
 
 # --- Phase 2: Privilege Delegation (doas.conf) ---
 backup /etc/doas.conf
 print "permit persist $USER_TARGET as root" >"$TMP/doas.conf"
-doas -C "$TMP/doas.conf" || err "invalid doas.conf syntax"
+if ! doas -C "$TMP/doas.conf"; then
+	err "invalid doas.conf syntax"
+fi
 install -m 0600 -o root -g wheel "$TMP/doas.conf" /etc/doas.conf
 assert "doas.conf permissions" "$(stat -f '%Mp%Lp' /etc/doas.conf)" "0600"
 
@@ -144,7 +152,9 @@ pass in quick proto tcp to port ssh flags S/SA keep state \
     (max-src-conn 10, max-src-conn-rate 5/30, overload <bruteforce> flush global)
 INNER_EOF
 
-pfctl -nf "$TMP/pf.conf" || err "invalid pf.conf syntax"
+if ! pfctl -nf "$TMP/pf.conf"; then
+	err "invalid pf.conf syntax"
+fi
 install -m 0600 -o root -g wheel "$TMP/pf.conf" /etc/pf.conf
 pfctl -f /etc/pf.conf
 assert "pf status" "$(pfctl -si | awk '/^Status:/ {print $2}')" "Enabled"
@@ -157,16 +167,21 @@ set_sshd PermitRootLogin no "$TMP/sshd_config"
 set_sshd X11Forwarding no "$TMP/sshd_config"
 set_sshd PermitEmptyPasswords no "$TMP/sshd_config"
 
-if [[ -s "$USER_HOME/.ssh/authorized_keys" ]] || [[ -s "/root/.ssh/authorized_keys" ]]; then
+want_pw="yes"
+if [ -s "$USER_HOME/.ssh/authorized_keys" ]; then
+	set_sshd PasswordAuthentication no "$TMP/sshd_config"
+	want_pw="no"
+elif [ -s "/root/.ssh/authorized_keys" ]; then
 	set_sshd PasswordAuthentication no "$TMP/sshd_config"
 	want_pw="no"
 else
-	print -u2 "warn: no authorized_keys found in $USER_HOME; keeping PasswordAuthentication yes"
+	print -u2 "warn: no authorized_keys found; keeping PasswordAuthentication yes"
 	set_sshd PasswordAuthentication yes "$TMP/sshd_config"
-	want_pw="yes"
 fi
 
-/usr/sbin/sshd -t -f "$TMP/sshd_config" || err "invalid sshd_config syntax"
+if ! /usr/sbin/sshd -t -f "$TMP/sshd_config"; then
+	err "invalid sshd_config syntax"
+fi
 install -m 0644 -o root -g wheel "$TMP/sshd_config" /etc/ssh/sshd_config
 rcctl reload sshd >/dev/null
 
@@ -176,7 +191,7 @@ assert "sshd PasswordAuthentication" "$(get_sshd_val passwordauthentication)" "$
 # --- Phase 6: Unused Base Daemon Minimization ---
 for svc in sndiod smtpd apmd; do
 	rcctl stop "$svc" >/dev/null 2>/dev/null || true
-	rcctl disable "$svc" >/dev/null
+	rcctl disable "$svc" >/dev/null 2>/dev/null || true
 	assert "service $svc disabled" "$(rcctl get "$svc" flags)" "NO"
 done
 
