@@ -13,12 +13,18 @@ err() {
 
 assert() {
 	local name="$1" got="$2" want="$3"
-	[[ "$got" == "$want" ]] || err "check failed for $name (got '$got', want '$want')"
+	if [[ "$got" != "$want" ]]; then
+		err "check failed for $name (got '$got', want '$want')"
+	fi
 	print "ok: $name ($got)"
 }
 
 backup() {
-	[[ -f "$1" && ! -f "$1.orig" ]] && cp -p "$1" "$1.orig" || true
+	if [[ -f "$1" ]]; then
+		if [[ ! -f "$1.orig" ]]; then
+			cp -p "$1" "$1.orig" || true
+		fi
+	fi
 }
 
 set_sysctl() {
@@ -59,15 +65,27 @@ get_sshd_val() {
 }
 
 # --- Pre-flight Checks ---
-[[ $(id -u) -eq 0 ]] || err "need root privileges (run via su - or doas)"
-[[ $(uname -s) == "OpenBSD" ]] || err "unsupported OS"
+if [[ $(id -u) -ne 0 ]]; then
+	err "need root privileges (run via su - or doas)"
+fi
+
+if [[ $(uname -s) != "OpenBSD" ]]; then
+	err "unsupported OS"
+fi
 
 USER_TARGET="${1:-}"
-[[ -n "$USER_TARGET" && "$USER_TARGET" != "root" ]] || err "usage: ${0##*/} <username>"
-id "$USER_TARGET" >/dev/null 2>/dev/null || err "user '$USER_TARGET' does not exist in /etc/passwd"
+if [[ -z "$USER_TARGET" ]] || [[ "$USER_TARGET" == "root" ]]; then
+	err "usage: ${0##*/} <username>"
+fi
+
+if ! id "$USER_TARGET" >/dev/null 2>/dev/null; then
+	err "user '$USER_TARGET' does not exist in /etc/passwd"
+fi
 
 USER_HOME="$(eval echo ~"$USER_TARGET")"
-[[ -d "$USER_HOME" ]] || err "missing home directory '$USER_HOME'"
+if [[ ! -d "$USER_HOME" ]]; then
+	err "missing home directory '$USER_HOME'"
+fi
 
 TMP="$(mktemp -d /tmp/harden.XXXXXXXXXX)"
 trap 'rm -rf "$TMP"' EXIT INT TERM HUP
@@ -85,7 +103,7 @@ print "=================================================================="
 for mp in /tmp /var /home; do
 	if mount | grep -q " on ${mp} "; then
 		opts="$(mount | grep " on ${mp} ")"
-		if [[ "$opts" == *nodev* && "$opts" == *nosuid* ]]; then
+		if [[ "$opts" == *nodev* ]] && [[ "$opts" == *nosuid* ]]; then
 			assert "fstab $mp security flags" "nodev,nosuid" "nodev,nosuid"
 		else
 			print -u2 "warn: $mp is missing nodev or nosuid mount flags"
@@ -139,7 +157,7 @@ set_sshd PermitRootLogin no "$TMP/sshd_config"
 set_sshd X11Forwarding no "$TMP/sshd_config"
 set_sshd PermitEmptyPasswords no "$TMP/sshd_config"
 
-if [[ -s "$USER_HOME/.ssh/authorized_keys" || -s "/root/.ssh/authorized_keys" ]]; then
+if [[ -s "$USER_HOME/.ssh/authorized_keys" ]] || [[ -s "/root/.ssh/authorized_keys" ]]; then
 	set_sshd PasswordAuthentication no "$TMP/sshd_config"
 	want_pw="no"
 else
